@@ -5,7 +5,7 @@
 This allows an EG4 Chargeverter to query [YamBMS](https://github.com/Sleeper85/esphome-yambms) for SOC and Voltage.  YamBMS is designed to send your battery data to your inverter over CANbus, but an EG4 Chargeverter uses RS485.  The Chargeverter acts as the "server" which queries your batteries over RS485.  This emulates the EG4 battery protocol to allow YamBMS to respond to the Chargeverter queries as if it were an EG4 battery.
 
 ## WARNING
-**USE THIS PROGRAM AT YOUR OWN RISK I ACCEPT NOI LIABILITY FOR ANY USE OF THIS PROGRAM.  THIS PROGRAM IS STRICTLY FOR REFERENCE ONLY!**
+**USE THIS PROGRAM AT YOUR OWN RISK - I ACCEPT NO LIABILITY FOR ANY USE OF THIS PROGRAM.  THIS PROGRAM IS STRICTLY FOR REFERENCE ONLY!**
 
 This is completely experimental.  While I have verified that this correctly sends SOC and Voltage data from YamBMS to the Chargeverter, the chargeverter expects 15 other data points that I have not verified.  Futhermore, the Anthropic Claude AI was used to guess at how this protocol should behave and what registers it should respond with.  It took a lot of trial and error just to get this working, do not trust it without extensive testing.
 
