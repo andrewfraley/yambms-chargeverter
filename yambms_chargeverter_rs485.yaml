@@ -3,6 +3,18 @@
 # https://github.com/Sleeper85/esphome-yambms
 
 
+# Usage - Add the following to your YamBMS yaml file
+
+  # rs485_chargeverter:
+  #   url: https://github.com/andrewfraley/yambms-chargeverter
+  #   ref: main
+  #   refresh: 0s
+  #   files:
+  #     - path: 'yambms_chargeverter_rs485.yaml'
+  #       vars:
+  #         rs485_uart_id: "uart_esp_3"
+  #         yambms_id: "yambms1"
+
 
 # EG4 Chargeverter - Modbus RTU Protocol
 # Baud rate: 9600
