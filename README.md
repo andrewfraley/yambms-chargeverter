@@ -31,6 +31,8 @@ Add the following to your YamBMS yaml file.  Be sure to change the rs485_uart_id
           yambms_id: "yambms1"
 ```
 
+If it's working, your charge verter should show the actual SOC on the screen instead of "LOST".  Enabling debug mode in your YamBMS yaml will output a lot more logging for this module.
+
 ## Links
 - [yambms-chargeverter](https://github.com/andrewfraley/yambms-chargeverter) (this repo)
 - [YamBMS Github repo](https://github.com/Sleeper85/esphome-yambms)
