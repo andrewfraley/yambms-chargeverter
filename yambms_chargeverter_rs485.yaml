@@ -1,0 +1,306 @@
+# https://github.com/andrewfraley/yambms-chargeverter
+
+# https://github.com/Sleeper85/esphome-yambms
+
+
+
+# EG4 Chargeverter - Modbus RTU Protocol
+# Baud rate: 9600
+# Mode: YamBMS acts as Modbus RTU slave, responds to EG4 Chargeverter (master) queries
+# Slave Address: 0x01
+# Function Code 3: Read Holding Registers
+# Query: [SLAVE_ADDR][FUNC_3][REG_ADDR_HI][REG_ADDR_LO][QTY_HI][QTY_LO][CRC_LO][CRC_HI]
+# Response: [SLAVE_ADDR][FUNC_3][BYTE_COUNT][REG_DATA...][CRC_LO][CRC_HI]
+
+# EG4 Chargeverter Register Mapping (EG4 LL Battery Modbus Protocol)
+# Chargeverter queries 17 registers starting at 0x0013 (0x0013-0x0023)
+# Register mapping based on actual Chargeverter behavior (empirically verified):
+# 0x0013 (19) = Reserved/Unknown (return 0)
+# 0x0014 (20) = Current (0.1A, signed) - current
+# 0x0015 (21) = SOC (1%) - battery_soc (confirmed working)
+# 0x0016 (22) = Voltage (0.01V) - total_voltage (confirmed working)
+# 0x0017 (23) = Charge Current Limit (0.1A) - requested_charge_current
+# 0x0018 (24) = SOH (1%) - battery_soh
+# 0x0019 (25) = SOC (1%) - duplicate or reserved (SOC also at 0x0015)
+# 0x001A (26) = Max Temperature (0.1°C, signed) - max_temperature
+# 0x001B (27) = Min Temperature (0.1°C, signed) - min_temperature
+# 0x001C (28) = Capacity (0.01Ah) - battery_capacity
+# 0x001D (29) = Reserved/Unknown - status or protection flags
+# 0x001E (30) = Discharge Current Limit (0.1A) - requested_discharge_current
+# 0x001F (31) = Charge Voltage Limit (0.01V) - requested_charge_voltage
+# 0x0020 (32) = Reserved/Unknown - cycles (lower 16 bits) or 0
+# 0x0021 (33) = Reserved/Unknown - cycles (upper 16 bits) or 0
+# 0x0022 (34) = Reserved/Unknown - 0
+# 0x0023 (35) = Reserved/Unknown - 0
+
+uart:
+  - id: !extend ${rs485_uart_id}
+    baud_rate: 9600
+
+# Global variable to track last valid Chargeverter query timestamp
+globals:
+  - id: chargeverter_last_query_time
+    type: unsigned long
+    restore_value: no
+    initial_value: '0'
+
+# Binary sensor to indicate Chargeverter communication status
+binary_sensor:
+  - platform: template
+    id: chargeverter_connected
+    name: "Chargeverter Connected"
+    device_class: connectivity
+    lambda: |-
+      unsigned long now = millis();
+      unsigned long last_query = id(chargeverter_last_query_time);
+      // Consider connected if query received within last 2 seconds
+      return (now - last_query) < 2000 && last_query > 0;
+
+# CRC-16 Modbus lookup table (precomputed)
+esphome:
+  on_boot:
+    then:
+      - lambda: |-
+          // CRC-16 CCITT (Modbus) uses polynomial 0x8005 with XOR init/out
+
+interval:
+  # Listen for Modbus RTU queries and respond
+  - interval: 250ms
+    then:
+      - lambda: |-
+          uart::UARTComponent *uart = static_cast<uart::UARTComponent *>(
+            id(${rs485_uart_id})
+          );
+
+          if (uart == nullptr) {
+            return;
+          }
+
+          // Read available bytes (max 100 bytes - Modbus RTU frames typically <50)
+          uint8_t buffer[100];
+          size_t bytes_read = 0;
+          uint8_t byte;
+
+          while (uart->available() > 0 && bytes_read < 100) {
+            if (uart->read_byte(&byte)) {
+              buffer[bytes_read++] = byte;
+            }
+          }
+
+          // Must be at least 8 bytes (minimum Modbus RTU frame)
+          if (bytes_read < 8) {
+            return;
+          }
+
+          // Parse Modbus RTU query
+          uint8_t slave_addr = buffer[0];
+          uint8_t func_code = buffer[1];
+          uint16_t reg_addr = (buffer[2] << 8) | buffer[3];
+          uint16_t quantity = (buffer[4] << 8) | buffer[5];
+          uint16_t rx_crc = (buffer[7] << 8) | buffer[6];  // CRC is little-endian
+
+          // Only respond to queries for slave address 0x01
+          if (slave_addr != 0x01) {
+            return;
+          }
+
+          // Only respond to Function Code 3 (Read Holding Registers)
+          if (func_code != 0x03) {
+            return;
+          }
+
+          // Only respond to queries for registers 0x0013-0x0023 (17 registers total)
+          // Chargeverter queries 17 registers starting at 0x0013
+          if (reg_addr < 0x0013 || reg_addr + quantity > 0x0024) {
+            return;
+          }
+
+          // Verify CRC-16
+          uint16_t calc_crc = 0xFFFF;
+          for (int i = 0; i < 6; i++) {
+            calc_crc ^= buffer[i];
+            for (int j = 0; j < 8; j++) {
+              if (calc_crc & 0x0001) {
+                calc_crc = (calc_crc >> 1) ^ 0xA001;
+              } else {
+                calc_crc = calc_crc >> 1;
+              }
+            }
+          }
+          if (calc_crc != rx_crc) {
+            ESP_LOGD("chargeverter", "CRC mismatch");
+            return;
+          }
+
+          // Log received query
+          ESP_LOGI("chargeverter", "Query received from Chargeverter");
+
+          // Log query hex dump at debug level
+          std::string query_hex = "";
+          for (int i = 0; i < bytes_read && i < 50; i++) {
+            char hex[4];
+            sprintf(hex, "%02X ", buffer[i]);
+            query_hex += hex;
+          }
+          ESP_LOGD("chargeverter", "Query %d bytes: %s", bytes_read, query_hex.c_str());
+
+          // Update last query timestamp for connectivity monitoring
+          id(chargeverter_last_query_time) = millis();
+
+          // Build response: [SLAVE][FUNC][BYTE_COUNT][DATA...][CRC_LO][CRC_HI]
+          uint8_t response[100];
+          response[0] = 0x01;  // Slave address
+          response[1] = 0x03;  // Function code
+          response[2] = quantity * 2;  // Byte count (2 bytes per register)
+
+          uint16_t response_idx = 3;
+
+          // Read YamBMS data and fill register values
+          for (uint16_t i = 0; i < quantity; i++) {
+            uint16_t current_reg = reg_addr + i;
+            uint16_t value = 0;
+
+            switch (current_reg) {
+              case 0x0013: {  // Reserved/Unknown (was Temp MOS in original)
+                value = 0;  // Unknown purpose, return 0
+                ESP_LOGD("chargeverter", "0x0013: Reserved → raw=%u (0x%04X)", value, value);
+                break;
+              }
+              case 0x0014: {  // Current (0.1A, signed)
+                float current = id(${yambms_id}_current).state;
+                value = (int16_t)(current * 10);  // Convert A to 0.1A units, signed
+                ESP_LOGD("chargeverter", "0x0014: Current=%.2fA → raw=%d (0x%04X)", current, (int16_t)value, value);
+                break;
+              }
+              case 0x0015: {  // SOC (1%) - confirmed working
+                value = (uint16_t)id(${yambms_id}_battery_soc).state;
+                ESP_LOGD("chargeverter", "0x0015: SOC=%u%% → raw=%u (0x%04X)", value, value, value);
+                break;
+              }
+              case 0x0016: {  // Voltage (0.01V) - confirmed working at this register
+                float voltage = id(${yambms_id}_total_voltage).state;
+                value = (uint16_t)(voltage * 100);  // Convert V to 0.01V units
+                ESP_LOGD("chargeverter", "0x0016: Voltage=%.2fV → raw=%u (0x%04X)", voltage, value, value);
+                break;
+              }
+              case 0x0017: {  // Reserved/Unknown - Max Charge Current or reserved
+                // Unknown purpose, return 0 or max charge current as fallback
+                float ccl = id(${yambms_id}_requested_charge_current).state;
+                value = (uint16_t)(ccl * 10);  // Convert A to 0.1A units
+                ESP_LOGD("chargeverter", "0x0017: Reserved/CCL=%.1fA → raw=%u (0x%04X)", ccl, value, value);
+                break;
+              }
+              case 0x0018: {  // SOH (1%)
+                if (id(${yambms_id}_battery_soh).has_state()) {
+                  value = (uint16_t)id(${yambms_id}_battery_soh).state;
+                } else {
+                  value = 100;  // Default to 100% if SOH not available
+                }
+                ESP_LOGD("chargeverter", "0x0018: SOH=%u%% → raw=%u (0x%04X)", value, value, value);
+                break;
+              }
+              case 0x0019: {  // Reserved/Unknown - could be duplicate SOC or status
+                // Unknown purpose, return SOC as fallback (SOC is also at 0x0015)
+                value = (uint16_t)id(${yambms_id}_battery_soc).state;
+                ESP_LOGD("chargeverter", "0x0019: Reserved/SOC=%u%% → raw=%u (0x%04X)", value, value, value);
+                break;
+              }
+              case 0x001A: {  // Max Temperature (0.1°C, signed)
+                float max_temp = id(${yambms_id}_max_temperature).state;
+                value = (int16_t)(max_temp * 10);  // Convert °C to 0.1°C units, signed
+                ESP_LOGD("chargeverter", "0x001A: MaxTemp=%.1f°C → raw=%d (0x%04X)", max_temp, (int16_t)value, value);
+                break;
+              }
+              case 0x001B: {  // Min Temperature (0.1°C, signed)
+                float min_temp = id(${yambms_id}_min_temperature).state;
+                value = (int16_t)(min_temp * 10);  // Convert °C to 0.1°C units, signed
+                ESP_LOGD("chargeverter", "0x001B: MinTemp=%.1f°C → raw=%d (0x%04X)", min_temp, (int16_t)value, value);
+                break;
+              }
+              case 0x001C: {  // Capacity (0.01Ah)
+                float capacity_ah = id(${yambms_id}_battery_capacity).state;
+                value = (uint16_t)(capacity_ah * 100);  // Convert Ah to 0.01Ah units
+                ESP_LOGD("chargeverter", "0x001C: Capacity=%.2fAh → raw=%u (0x%04X)", capacity_ah, value, value);
+                break;
+              }
+              case 0x001D: {  // Charge Current Limit (0.1A)
+                float ccl = id(${yambms_id}_requested_charge_current).state;
+                value = (uint16_t)(ccl * 10);  // Convert A to 0.1A units
+                ESP_LOGD("chargeverter", "0x001D: CCL=%.1fA → raw=%u (0x%04X)", ccl, value, value);
+                break;
+              }
+              case 0x001E: {  // Discharge Current Limit (0.1A)
+                float dcl = id(${yambms_id}_requested_discharge_current).state;
+                value = (uint16_t)(dcl * 10);  // Convert A to 0.1A units
+                ESP_LOGD("chargeverter", "0x001E: DCL=%.1fA → raw=%u (0x%04X)", dcl, value, value);
+                break;
+              }
+              case 0x001F: {  // Charge Voltage Limit (0.01V)
+                float cvl = id(${yambms_id}_requested_charge_voltage).state;
+                value = (uint16_t)(cvl * 100);  // Convert V to 0.01V units
+                ESP_LOGD("chargeverter", "0x001F: CVL=%.2fV → raw=%u (0x%04X)", cvl, value, value);
+                break;
+              }
+              case 0x0020: {  // Reserved/Unknown - cycles (lower 16 bits) or 0
+                // Not documented, providing cycles as fallback data
+                uint32_t cycles = (uint32_t)id(${yambms_id}_charging_cycles).state;
+                value = (uint16_t)(cycles & 0xFFFF);  // Lower 16 bits
+                ESP_LOGD("chargeverter", "0x0020: Cycles(L)=%u → raw=%u (0x%04X)", cycles, value, value);
+                break;
+              }
+              case 0x0021: {  // Reserved/Unknown - cycles (upper 16 bits) or 0
+                uint32_t cycles = (uint32_t)id(${yambms_id}_charging_cycles).state;
+                value = (uint16_t)((cycles >> 16) & 0xFFFF);  // Upper 16 bits
+                ESP_LOGD("chargeverter", "0x0021: Cycles(H)=%u → raw=%u (0x%04X)", cycles, value, value);
+                break;
+              }
+              case 0x0022: {  // Reserved/Unknown
+                value = 0;  // Not documented, return 0
+                ESP_LOGD("chargeverter", "0x0022: Reserved → raw=%u (0x%04X)", value, value);
+                break;
+              }
+              case 0x0023: {  // Reserved/Unknown
+                value = 0;  // Not documented, return 0
+                ESP_LOGD("chargeverter", "0x0023: Reserved → raw=%u (0x%04X)", value, value);
+                break;
+              }
+              default:
+                value = 0;
+            }
+
+            // Add register value (big-endian for Modbus)
+            // Note: For signed values (Current, Temperatures), the uint16_t variable
+            // contains the two's complement bit pattern, which is correctly preserved
+            // when extracting bytes. Casting int16_t to uint16_t preserves the bit pattern.
+            response[response_idx++] = (value >> 8) & 0xFF;
+            response[response_idx++] = value & 0xFF;
+          }
+
+          // Calculate CRC-16 for response
+          uint16_t tx_crc = 0xFFFF;
+          for (uint16_t i = 0; i < response_idx; i++) {
+            tx_crc ^= response[i];
+            for (int j = 0; j < 8; j++) {
+              if (tx_crc & 0x0001) {
+                tx_crc = (tx_crc >> 1) ^ 0xA001;
+              } else {
+                tx_crc = tx_crc >> 1;
+              }
+            }
+          }
+
+          // Append CRC (little-endian)
+          response[response_idx++] = tx_crc & 0xFF;
+          response[response_idx++] = (tx_crc >> 8) & 0xFF;
+
+          // Send response
+          uart->write_array(response, response_idx);
+
+          // Log complete response for debugging
+          std::string hex_dump = "";
+          for (int i = 0; i < response_idx && i < 50; i++) {
+            char hex[4];
+            sprintf(hex, "%02X ", response[i]);
+            hex_dump += hex;
+          }
+          ESP_LOGD("chargeverter", "Resp %d bytes: %s", response_idx, hex_dump.c_str());
