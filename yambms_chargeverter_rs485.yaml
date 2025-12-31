@@ -70,7 +70,7 @@ binary_sensor:
 
 interval:
   # Listen for Modbus RTU queries and respond
-  - interval: 250ms
+  - interval: 250ms # The Chargeverter queries every 500ms
     then:
       - lambda: |-
           uart::UARTComponent *uart = static_cast<uart::UARTComponent *>(
