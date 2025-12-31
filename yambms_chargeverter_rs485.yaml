@@ -68,13 +68,6 @@ binary_sensor:
       // Consider connected if query received within last 2 seconds
       return (now - last_query) < 2000 && last_query > 0;
 
-# CRC-16 Modbus lookup table (precomputed)
-esphome:
-  on_boot:
-    then:
-      - lambda: |-
-          // CRC-16 CCITT (Modbus) uses polynomial 0x8005 with XOR init/out
-
 interval:
   # Listen for Modbus RTU queries and respond
   - interval: 250ms
